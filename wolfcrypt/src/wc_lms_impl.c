@@ -1564,7 +1564,7 @@ static int wc_lmots_make_public_hash(LmsState* state, const byte* seed, byte* k)
  * @param [in]  priv    LMS private ley.
  * @param [out] pub     LMS public key.
  */
-static void wc_lmots_public_key_encode(const LmsParams* params,
+void wc_lmots_public_key_encode(const LmsParams* params,
     const byte* priv, byte* pub)
 {
     const byte* priv_i = priv + LMS_Q_LEN + params->hash_len;

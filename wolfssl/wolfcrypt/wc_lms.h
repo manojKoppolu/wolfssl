@@ -861,6 +861,8 @@ int wc_hss_make_key(LmsState* state, WC_RNG* rng, byte* priv_raw,
     HssPrivKey* priv_key, byte* priv_data, byte* pub);
 int wc_hss_reload_key(LmsState* state, const byte* priv_raw,
     HssPrivKey* priv_key, byte* priv_data, byte* pub_root);
+void wc_lmots_public_key_encode(const LmsParams* params, const byte* priv,
+    byte* pub);
 int wc_hss_sign(LmsState* state, byte* priv_raw, HssPrivKey* priv_key,
     byte* priv_data, const byte* msg, word32 msgSz, byte* sig);
 int wc_hss_sigsleft(const LmsParams* params, const byte* priv_raw);

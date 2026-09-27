@@ -1,0 +1,48 @@
+[ req ]
+distinguished_name     = req_distinguished_name
+x509_extensions        = v3_ca
+prompt                 = no
+ 
+dirstring_type = nobmp
+ 
+[ req_distinguished_name ]
+C                      = US
+ST                     = SC
+L                      = New York
+O                      = Texas Instruments., Inc.
+OU                     = DSP
+CN                     = Albert
+emailAddress           = Albert@gt.ti.com
+ 
+[ v3_ca ]
+basicConstraints = CA:true
+1.3.6.1.4.1.294.1.1=ASN1:SEQUENCE:boot_seq
+1.3.6.1.4.1.294.1.2=ASN1:SEQUENCE:image_integrity
+1.3.6.1.4.1.294.1.3=ASN1:SEQUENCE:swrv
+1.3.6.1.4.1.294.1.4 = ASN1:SEQUENCE:encryption
+1.3.6.1.4.1.294.1.12=ASN1:SEQUENCE:keyring_index
+ 
+[ boot_seq ]
+certType     =  INTEGER:2779054080
+bootCore     =  INTEGER:0
+bootCoreOpts =  INTEGER:0
+destAddr     =  FORMAT:HEX,OCT:00000000
+imageSize    =  INTEGER:30400
+ 
+[ image_integrity ]
+shaType = OID:2.16.840.1.101.3.4.2.3
+shaValue = FORMAT:HEX,OCT:24ab299e9fffac3261b154b42e1b5462a61c13ad08e502f9be6beb9a6b82201df061b5697e958f23b78e9f64e61ee27dc0f794005e435e188fbeae2dfb4f65df
+ 
+[ swrv ]
+swrv = INTEGER:1
+ 
+[ keyring_index ]
+sign_key_id = INTEGER:0
+enc_key_id  = INTEGER:0
+ 
+ 
+[ encryption ]
+initalVector =  FORMAT:HEX,OCT:af325724eb8c446c0b644736485858d5
+randomString =  FORMAT:HEX,OCT:6a976101590ddcb138298d50f993c2aef8079ce97b9c858be5e24317d8160f93
+iterationCnt =  INTEGER:1
+salt         =  FORMAT:HEX,OCT:acca65ded29296fea498ab8a9a15aaa27445ab7c75757c99125254619e4a513b

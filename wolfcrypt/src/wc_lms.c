@@ -1403,15 +1403,47 @@ int wc_LmsKey_Reload(LmsKey* key)
             /* Initialize working state for use. */
             ret = wc_lmskey_state_init(state, key->params);
             if (ret == 0) {
+            #ifndef WOLFSSL_WC_LMS_SMALL
+                /* wc_hss_init_auth_path() (called via wc_hss_reload_key)
+                 * computes the tree root as a side effect of rebuilding
+                 * the authentication path needed to sign - ask for it to
+                 * be written directly into key->pub at the offset the
+                 * RFC 8554 public key format expects (after
+                 * L || lmsType || lmOtsType || I), instead of discarding
+                 * it. wc_hss_make_key() computes and keeps this same
+                 * root; only WOLFSSL_WC_LMS_SMALL builds skip auth-path
+                 * caching entirely and have no root available here. */
+                byte* pub_root = key->pub + LMS_L_LEN + LMS_TYPE_LEN +
+                        LMS_TYPE_LEN + LMS_I_LEN;
+            #else
+                byte* pub_root = NULL;
+            #endif
+
                 /* Reload the key ready for signing. */
                 ret = wc_hss_reload_key(state, key->priv_raw, &key->priv,
-                    key->priv_data, NULL);
+                    key->priv_data, pub_root);
                 wc_lmskey_state_free(state);
             }
             ForceZero(state, sizeof(LmsState));
             WC_FREE_VAR_EX(state, NULL, DYNAMIC_TYPE_TMP_BUFFER);
         }
     }
+
+#ifndef WOLFSSL_WC_LMS_SMALL
+    if (ret == 0) {
+        /* Root is now in key->pub (see above); fill in the rest of the
+         * public key header from data wc_hss_reload_key() just expanded
+         * into key->priv.priv, matching what wc_LmsKey_MakeKey() leaves
+         * behind. Previously wc_LmsKey_Reload() left key->pub/pubSet
+         * completely unpopulated, so any caller needing the public key
+         * (e.g. wc_MakeCert_ex() embedding it in a certificate) failed
+         * with PUBLIC_KEY_E after a reload even though signing worked. */
+        c32toa(key->params->levels, key->pub);
+        wc_lmots_public_key_encode(key->params, key->priv.priv,
+            key->pub + LMS_L_LEN);
+        key->pubSet = 1;
+    }
+#endif
 
     if (ret == 0) {
         /* Update state. */

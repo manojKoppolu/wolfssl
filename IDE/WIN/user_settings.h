@@ -16,6 +16,10 @@
 #define WOLFSSL_DTLS13
 #define WOLFSSL_SEND_HRR_COOKIE
 #define WOLFSSL_DTLS_CID
+#define WOLFSSL_HAVE_LMS
+#define WOLFSSL_CERT_EXT
+#define WOLFSSL_CUSTOM_OID
+#define HAVE_OID_ENCODING
 
 /* Configurations */
 #if defined(HAVE_FIPS)
