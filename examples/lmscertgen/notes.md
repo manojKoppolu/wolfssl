@@ -297,4 +297,59 @@ and other named extensions, `$ENV` variable substitution, `.include`,
 `BOOLEAN`, `UTF8String`, `BITSTRING`, ...). The typed-value encoder
 (`BuildSequenceFromSection()` in `lmscertgen.c`) is a small dispatch over
 value prefixes, so adding another `TYPE:` is a matter of adding one more
+
+## `OID:` typed values (2026-10-30)
+
+Added `OID:<dotted-decimal>` as a third supported typed value in
+`BuildSequenceFromSection()`, alongside the existing `INTEGER:` and
+`FORMAT:HEX,OCT:`, via a new `DerOid()` encoder. Standard DER OBJECT
+IDENTIFIER encoding: the first two arcs combine into one byte
+(`40*X + Y`), every arc after that is base-128 big-endian with the
+continuation bit set on every byte but the last.
+
+This was needed because `sample.cnf`'s `[image_integrity]` section
+already had `shaType = OID:2.16.840.1.101.3.4.2.3` (the SHA-512 OID,
+matching the real TI firmware's `image_integrity` extension format,
+`SEQUENCE { OID shaType, OCTET STRING shaValue }`) - before this change
+that line was silently skipped (`BuildSequenceFromSection()` only
+recognized `INTEGER:`/`FORMAT:HEX,OCT:`), so any custom extension
+needing an embedded OID value was unsupported. This specifically unblocks
+driving `lmscertgen.exe` from `tools/boot/signing/
+mcu_appimage_x509_cert_gen.py` in the TIFS firmware repo (see that
+script's own `notes.md` for the full picture), whose config template
+also encodes a hash-algorithm OID the same way.
+
+## Non-interactive CLI mode (2026-10-30)
+
+Added an argv-driven mode, activated whenever any command-line argument
+is present (no arguments at all still gives the original fully
+interactive prompts, unchanged):
+```
+lmscertgen --priv-key <path> --pub-key <path> --cnf <path> --out-crt <path> [--out-pem <path>]
+```
+Added so a build script (`mcu_appimage_x509_cert_gen.py`, TIFS firmware
+repo) can drive certificate signing without a human typing prompts.
+`--priv-key`/`--pub-key` default to `lms_priv.key`/`lms_pub.key` in the
+current directory (the interactive mode's own filenames) if omitted.
+
+**Deliberately refuses to generate a new LMS key pair** if `--priv-key`
+doesn't already exist (`LoadProvisionedLmsKey()`) - this mode only
+reloads an already-provisioned key. Rationale: LMS/HSS is a *stateful*
+signature scheme (every signature consumes a one-time key and advances
+a leaf index that must be persisted, RFC 8554's core security property),
+so a silently-generated key in an unattended build would produce a
+certificate whose public key was never registered in the device's
+keyring (`tools/keyring_cert/keys.json`, TIFS repo) - the resulting
+signed image would then fail on-device verification for a reason with
+no obvious cause from the build log. Provisioning a key is a deliberate,
+one-time, interactive step that must happen before this mode is ever
+used against that key's path.
+
+`GenerateCertFromCnfFile()` gained `outCrtPath`/`outPemPath` parameters
+(previously hardcoded to `CERT_CRT_FILE`/`CERT_PEM_FILE`) so the CLI
+mode can write to caller-chosen paths; `outPemPath` may be `NULL` to
+skip writing a PEM copy entirely, since a build script driving this
+tool only needs the DER `.crt` to concatenate onto an application image.
+The interactive mode's own call site is unchanged in behavior - it still
+always writes both `lms_cert.crt` and `lms_cert.pem`.
 `else if` and a matching `Der*()` encoder - not a redesign.

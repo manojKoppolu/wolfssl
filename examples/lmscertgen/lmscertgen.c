@@ -8,16 +8,31 @@
  * (see IDE/WIN/user_settings.h) and wolfcrypt/src/wc_lms.c /
  * wc_lms_impl.c added to wolfssl.vcxproj.
  *
- * Interactively offers two signing modes:
+ * Run with no arguments for an interactive prompt offering two signing
+ * modes:
  *   1) Sign raw bytes typed at the prompt (no certificate produced).
  *   2) Generate and sign a certificate from an openssl.cnf-style config
  *      file - supports [req] distinguished_name/x509_extensions pointers,
  *      C/ST/L/O/OU/CN/emailAddress, basicConstraints, and custom-OID
  *      extensions written as "<oid> = ASN1:SEQUENCE:<section>" where
  *      <section>'s entries are typed INTEGER:<val> / FORMAT:HEX,OCT:<hex>
- *      values (see sample.cnf). This is NOT a general OpenSSL config
- *      parser - other directives (subjectAltName, keyUsage, $ENV vars,
- *      .include, other ASN1: types, etc.) are reported and skipped.
+ *      / OID:<dotted> values (see sample.cnf). This is NOT a general
+ *      OpenSSL config parser - other directives (subjectAltName,
+ *      keyUsage, $ENV vars, .include, other ASN1: types, etc.) are
+ *      reported and skipped.
+ *
+ * Run with arguments for non-interactive signing, meant to be driven by
+ * a build script (see tools/boot/signing/mcu_appimage_x509_cert_gen.py
+ * in the TIFS firmware repo):
+ *   lmscertgen --priv-key <path> --cnf <path> --out-crt <path>
+ *              [--out-pem <path>]
+ * This mode requires an LMS key already provisioned at <path> (via the
+ * interactive mode above, or a prior run of this mode against the same
+ * path) - it deliberately does NOT generate a new key pair if one isn't
+ * found there, since an unattended build silently signing with a brand
+ * new key would produce a certificate whose public key was never
+ * registered in the device's keyring (see tools/keyring_cert/ in the
+ * TIFS repo), failing verification on-device with no obvious reason why.
  */
 
 #include <wolfssl/wolfcrypt/wc_port.h>
@@ -360,6 +375,91 @@ static word32 DerOctetStringHex(byte* out, word32 outLen, const char* hex)
     return total;
 }
 
+/* Encode a dotted-decimal OID string (e.g. "2.16.840.1.101.3.4.2.3",
+ * SHA-512 per RFC 8017) as a DER OBJECT IDENTIFIER. Standard encoding:
+ * the first two arcs combine into one byte (40*X + Y), every arc after
+ * that is base-128 big-endian with the continuation bit (0x80) set on
+ * every byte but the last of that arc's encoding. Mirrors the hardcoded
+ * OID byte arrays already used elsewhere in this codebase (e.g.
+ * TIFS firmware's asn1_parse.c hss_lms_hashsig_oid[]), just computed
+ * from a dotted string instead of hand-transcribed. */
+static word32 DerOid(byte* out, word32 outLen, const char* dotted)
+{
+    byte           content[64];
+    word32         contentLen = 0;
+    unsigned long  arc;
+    unsigned long  first;
+    const char*    p = dotted;
+    int            arcIndex = 0;
+    word32         lenLen;
+    word32         total;
+
+    while (*p != '\0') {
+        arc = 0;
+        while (*p >= '0' && *p <= '9') {
+            arc = (arc * 10UL) + (unsigned long)(*p - '0');
+            p++;
+        }
+        if (*p == '.')
+            p++;
+        else if (*p != '\0') {
+            printf("DerOid: invalid character in OID string: %s\n",
+                    dotted);
+            return 0;
+        }
+
+        if (arcIndex == 0) {
+            first = arc;
+            arcIndex++;
+            continue;
+        }
+        else if (arcIndex == 1) {
+            if (contentLen >= sizeof(content))
+                return 0;
+            content[contentLen++] = (byte)((first * 40UL) + arc);
+        }
+        else {
+            byte   base128[10];
+            int    base128Len = 0;
+            unsigned long v = arc;
+
+            do {
+                base128[base128Len++] = (byte)(v & 0x7FUL);
+                v >>= 7;
+            } while (v != 0UL && base128Len < (int)sizeof(base128));
+
+            while (base128Len > 0) {
+                byte b = base128[--base128Len];
+
+                if (base128Len > 0)
+                    b |= 0x80U;
+                if (contentLen >= sizeof(content))
+                    return 0;
+                content[contentLen++] = b;
+            }
+        }
+        arcIndex++;
+    }
+
+    if (arcIndex < 2) {
+        printf("DerOid: need at least two arcs: %s\n", dotted);
+        return 0;
+    }
+
+    lenLen = DerLen(NULL, contentLen);
+    total = 1 + lenLen + contentLen;
+
+    if (out != NULL) {
+        if (total > outLen)
+            return 0;
+        out[0] = 0x06; /* OBJECT IDENTIFIER tag */
+        DerLen(out + 1, contentLen);
+        memcpy(out + 1 + lenLen, content, contentLen);
+    }
+
+    return total;
+}
+
 static word32 DerSequenceWrap(byte* out, word32 outLen, const byte* content,
         word32 contentLen)
 {
@@ -378,9 +478,12 @@ static word32 DerSequenceWrap(byte* out, word32 outLen, const byte* content,
 }
 
 /* Build a DER SEQUENCE from every "key = TYPE:value" entry in
- * 'sectionName', in file order. Supports exactly the two typed-value
- * forms the sample config uses: "INTEGER:<dec-or-0x-hex>" and
- * "FORMAT:HEX,OCT:<hex>". Anything else is reported and skipped. */
+ * 'sectionName', in file order. Supports the three typed-value forms
+ * the sample config uses: "INTEGER:<dec-or-0x-hex>",
+ * "FORMAT:HEX,OCT:<hex>", and "OID:<dotted-decimal>" (e.g.
+ * image_integrity's shaType field, per RFC 8017's AlgorithmIdentifier
+ * convention of identifying a hash algorithm by its OID). Anything else
+ * is reported and skipped. */
 static word32 BuildSequenceFromSection(const char* sectionName,
         byte* out, word32 outLen)
 {
@@ -406,6 +509,10 @@ static word32 BuildSequenceFromSection(const char* sectionName,
         else if (strncmp(val, "FORMAT:HEX,OCT:", 15) == 0) {
             written = DerOctetStringHex(content + contentLen,
                     (word32)sizeof(content) - contentLen, val + 15);
+        }
+        else if (strncmp(val, "OID:", 4) == 0) {
+            written = DerOid(content + contentLen,
+                    (word32)sizeof(content) - contentLen, val + 4);
         }
         else {
             printf("Skipping unsupported typed value in [%s] %s = %s\n",
@@ -519,8 +626,15 @@ static void ApplyCnfExtensions(Cert* cert, const char* extSection)
     }
 }
 
+/* outCrtPath is required; outPemPath may be NULL to skip writing a PEM
+ * copy entirely (the non-interactive CLI mode makes this optional since
+ * a build script driving this tool only needs the DER .crt to
+ * concatenate onto an application image - see
+ * tools/boot/signing/mcu_appimage_x509_cert_gen.py in the TIFS firmware
+ * repo). */
 static int GenerateCertFromCnfFile(LmsKey* lmsKey, WC_RNG* rng,
-        const char* path, byte* der, word32 derCap)
+        const char* path, byte* der, word32 derCap,
+        const char* outCrtPath, const char* outPemPath)
 {
     Cert        cert;
     int         derSz;
@@ -569,14 +683,17 @@ static int GenerateCertFromCnfFile(LmsKey* lmsKey, WC_RNG* rng,
     }
     printf("Signed certificate is %d bytes (DER)\n", derSz);
 
-    f = fopen(CERT_CRT_FILE, "wb");
+    f = fopen(outCrtPath, "wb");
     if (f == NULL) {
-        printf("Could not open %s for writing\n", CERT_CRT_FILE);
+        printf("Could not open %s for writing\n", outCrtPath);
         return -1;
     }
     fwrite(der, 1, (size_t)derSz, f);
     fclose(f);
-    printf("Wrote %s\n", CERT_CRT_FILE);
+    printf("Wrote %s\n", outCrtPath);
+
+    if (outPemPath == NULL)
+        return 0;
 
     pemSz = wc_DerToPem(der, (word32)derSz, pem, sizeof(pem), CERT_TYPE);
     if (pemSz < 0) {
@@ -584,14 +701,14 @@ static int GenerateCertFromCnfFile(LmsKey* lmsKey, WC_RNG* rng,
         return pemSz;
     }
 
-    f = fopen(CERT_PEM_FILE, "wb");
+    f = fopen(outPemPath, "wb");
     if (f == NULL) {
-        printf("Could not open %s for writing\n", CERT_PEM_FILE);
+        printf("Could not open %s for writing\n", outPemPath);
         return -1;
     }
     fwrite(pem, 1, (size_t)pemSz, f);
     fclose(f);
-    printf("Wrote %s\n", CERT_PEM_FILE);
+    printf("Wrote %s\n", outPemPath);
 
     return 0;
 }
@@ -701,15 +818,182 @@ static int SignRawMessageInteractive(LmsKey* lmsKey)
     return ret;
 }
 
-int main(void)
+/*-----------------------------------------------------------------------
+ * Non-interactive CLI mode
+ *
+ * Driven by a build script (see
+ * tools/boot/signing/mcu_appimage_x509_cert_gen.py in the TIFS firmware
+ * repo) rather than a human at a terminal. Activated whenever any
+ * argv[] is present; with no arguments this program behaves exactly as
+ * before (fully interactive prompts).
+ *---------------------------------------------------------------------*/
+typedef struct {
+    const char* privKeyPath;
+    const char* pubKeyPath;
+    const char* cnfPath;
+    const char* outCrtPath;
+    const char* outPemPath;
+} CliArgs;
+
+static void PrintUsage(const char* argv0)
+{
+    printf("Usage: %s [--priv-key <path>] [--pub-key <path>] "
+            "--cnf <path> --out-crt <path> [--out-pem <path>]\n", argv0);
+    printf("  Non-interactive mode: signs a certificate built from an "
+            "openssl.cnf-style\n  config file using an already-"
+            "provisioned LMS key. Fails if --priv-key\n  does not "
+            "already exist - this mode never generates a new key pair, "
+            "since an\n  unattended build silently signing with a "
+            "brand new key would produce a\n  certificate whose public "
+            "key was never registered in the device's\n  keyring (see "
+            "tools/keyring_cert/ in the TIFS firmware repo).\n");
+    printf("  Run with no arguments at all for the original interactive "
+            "prompts\n  (raw-byte signing, or key generation).\n");
+    printf("  --priv-key defaults to %s, --pub-key defaults to %s if "
+            "omitted.\n", LMS_PRIV_KEY_FILE, LMS_PUB_KEY_FILE);
+}
+
+static int ParseCliArgs(int argc, char** argv, CliArgs* out)
+{
+    int i;
+
+    out->privKeyPath = LMS_PRIV_KEY_FILE;
+    out->pubKeyPath  = LMS_PUB_KEY_FILE;
+    out->cnfPath     = NULL;
+    out->outCrtPath  = NULL;
+    out->outPemPath  = NULL;
+
+    for (i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--priv-key") == 0 && (i + 1) < argc)
+            out->privKeyPath = argv[++i];
+        else if (strcmp(argv[i], "--pub-key") == 0 && (i + 1) < argc)
+            out->pubKeyPath = argv[++i];
+        else if (strcmp(argv[i], "--cnf") == 0 && (i + 1) < argc)
+            out->cnfPath = argv[++i];
+        else if (strcmp(argv[i], "--out-crt") == 0 && (i + 1) < argc)
+            out->outCrtPath = argv[++i];
+        else if (strcmp(argv[i], "--out-pem") == 0 && (i + 1) < argc)
+            out->outPemPath = argv[++i];
+        else if (strcmp(argv[i], "-h") == 0 ||
+                strcmp(argv[i], "--help") == 0) {
+            return -1;
+        }
+        else {
+            printf("Unrecognized argument: %s\n", argv[i]);
+            return -1;
+        }
+    }
+
+    if (out->cnfPath == NULL || out->outCrtPath == NULL) {
+        printf("Both --cnf and --out-crt are required in "
+                "non-interactive mode.\n");
+        return -1;
+    }
+
+    return 0;
+}
+
+/* Loads an already-provisioned LMS key (private key state + saved
+ * public key) from the given paths and verifies the reload reproduces
+ * the saved public key exactly - the same reload-then-cross-check
+ * sequence the interactive "reuse existing key" path performs below,
+ * factored out since the CLI path needs it without any of the
+ * generate-a-new-key branching (see the hard-fail rationale in
+ * PrintUsage()/the file header comment). Returns 0 on success. */
+static int LoadProvisionedLmsKey(LmsKey* lmsKey, const char* privKeyPath,
+        const char* pubKeyPath)
+{
+    FILE*  existing;
+    FILE*  f;
+    byte   savedPub[128];
+    byte   reloadedPub[128];
+    size_t savedPubLen;
+    word32 reloadedPubLen = sizeof(reloadedPub);
+    int    ret;
+
+    existing = fopen(privKeyPath, "rb");
+    if (existing == NULL) {
+        printf("No LMS private key found at %s - this mode requires an "
+                "already-provisioned key (run interactively first, or "
+                "point --priv-key at an existing key).\n", privKeyPath);
+        return -1;
+    }
+    fclose(existing);
+
+    ret = wc_LmsKey_SetContext(lmsKey, (void*)privKeyPath);
+    if (ret != 0) {
+        printf("wc_LmsKey_SetContext failed: %d\n", ret);
+        return ret;
+    }
+
+    printf("Reusing existing LMS key - reloading state from %s...\n",
+            privKeyPath);
+    ret = wc_LmsKey_Reload(lmsKey);
+    printf("wc_LmsKey_Reload done: %d\n", ret);
+    if (ret == BAD_STATE_E) {
+        printf("This key has no one-time signatures left.\n");
+    }
+    if (ret != 0)
+        return ret;
+
+    ret = wc_LmsKey_ExportPubRaw(lmsKey, reloadedPub, &reloadedPubLen);
+    if (ret != 0) {
+        printf("wc_LmsKey_ExportPubRaw failed: %d\n", ret);
+        return ret;
+    }
+
+    f = fopen(pubKeyPath, "rb");
+    if (f == NULL) {
+        printf("Could not open %s for reading\n", pubKeyPath);
+        return -1;
+    }
+    savedPubLen = fread(savedPub, 1, sizeof(savedPub), f);
+    fclose(f);
+
+    if (savedPubLen != reloadedPubLen ||
+            memcmp(savedPub, reloadedPub, reloadedPubLen) != 0) {
+        printf("MISMATCH: public key recomputed by reload does not "
+                "match %s\n", pubKeyPath);
+        return -1;
+    }
+
+    printf("Verified: recomputed Merkle tree root matches saved public "
+            "key (%zu bytes)\n", savedPubLen);
+    return 0;
+}
+
+static int RunNonInteractive(LmsKey* lmsKey, WC_RNG* rng,
+        const CliArgs* args, byte* der, word32 derCap)
+{
+    int ret;
+
+    ret = LoadProvisionedLmsKey(lmsKey, args->privKeyPath,
+            args->pubKeyPath);
+    if (ret != 0)
+        return ret;
+
+    return GenerateCertFromCnfFile(lmsKey, rng, args->cnfPath, der,
+            derCap, args->outCrtPath, args->outPemPath);
+}
+
+int main(int argc, char** argv)
 {
     int    ret;
     LmsKey lmsKey;
     WC_RNG rng;
     byte   der[4096];
     FILE*  f;
+    CliArgs cliArgs;
+    int    nonInteractive = (argc > 1);
 
     setvbuf(stdout, NULL, _IONBF, 0);
+
+    if (nonInteractive) {
+        if (ParseCliArgs(argc, argv, &cliArgs) != 0) {
+            PrintUsage(argv[0]);
+            return 2;
+        }
+    }
 
     printf("start\n");
 
@@ -745,12 +1029,29 @@ int main(void)
     ret = wc_LmsKey_SetWriteCb(&lmsKey, LmsWritePrivKey);
     if (ret == 0)
         ret = wc_LmsKey_SetReadCb(&lmsKey, LmsReadPrivKey);
-    if (ret == 0)
-        ret = wc_LmsKey_SetContext(&lmsKey, (void*)LMS_PRIV_KEY_FILE);
+    if (ret == 0) {
+        ret = wc_LmsKey_SetContext(&lmsKey,
+                (void*)(nonInteractive ? cliArgs.privKeyPath :
+                        LMS_PRIV_KEY_FILE));
+    }
     printf("LMS key callback setup done: %d\n", ret);
     if (ret != 0) {
         printf("LMS key callback setup failed: %d\n", ret);
         return ret;
+    }
+
+    if (nonInteractive) {
+        ret = RunNonInteractive(&lmsKey, &rng, &cliArgs, der, sizeof(der));
+        if (ret != 0) {
+            printf("Non-interactive signing failed: %d\n", ret);
+            return ret;
+        }
+
+        wc_LmsKey_Free(&lmsKey);
+        wc_FreeRng(&rng);
+        wolfSSL_Cleanup();
+
+        return 0;
     }
 
     {
@@ -896,7 +1197,7 @@ int main(void)
             if (fgets(path, sizeof(path), stdin) != NULL) {
                 CnfStripTrailing(path);
                 ret = GenerateCertFromCnfFile(&lmsKey, &rng, path, der,
-                        sizeof(der));
+                        sizeof(der), CERT_CRT_FILE, CERT_PEM_FILE);
             }
             else {
                 printf("Failed to read config file path\n");
