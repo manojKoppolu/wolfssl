@@ -344,7 +344,6 @@ wrapper/CSharp/x64/
 # Visual Studio Code Workspace Files
 *.vscode
 *.userprefs
-*.exe
 *.dll
 .vs
 Backup
